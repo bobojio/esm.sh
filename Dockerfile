@@ -1,12 +1,12 @@
 FROM golang:1.16
 
-EXPOSE 80 
+EXPOSE 80
 
 WORKDIR /
 
 RUN apt-get update -y && apt-get install -y xz-utils
 
-RUN git clone https://github.com/postui/esm.sh
+ADD . /esm.sh
 
 WORKDIR /esm.sh
 
