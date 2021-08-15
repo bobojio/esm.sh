@@ -24,7 +24,7 @@ type ESM struct {
 	Dts           string   `json:"dts"`
 }
 
-func initESM(wd string, pkg pkg, deps pkgSlice) (esm *ESM, err error) {
+func initESM(wd string, pkg pkg, deps pkgSlice, nodeEnv string) (esm *ESM, err error) {
 	versions := map[string]string{}
 	for _, dep := range deps {
 		versions[dep.name] = dep.version
@@ -151,10 +151,6 @@ func initESM(wd string, pkg pkg, deps pkgSlice) (esm *ESM, err error) {
 		}
 	}
 
-	if esm.Module == "" && strings.HasSuffix(esm.Main, ".mjs") {
-		esm.Module = esm.Main
-	}
-
 	if esm.Module != "" {
 		resolved, exportDefault, err := checkESM(wd, esm.Name, esm.Module)
 		if err != nil {
@@ -167,7 +163,7 @@ func initESM(wd string, pkg pkg, deps pkgSlice) (esm *ESM, err error) {
 	}
 
 	if esm.Module == "" {
-		ret, err := parseCJSModuleExports(wd, pkg.ImportPath())
+		ret, err := parseCJSModuleExports(wd, pkg.ImportPath(), nodeEnv)
 		if err != nil {
 			return nil, fmt.Errorf("parseCJSModuleExports: %v", err)
 		}
@@ -191,7 +187,7 @@ func initESM(wd string, pkg pkg, deps pkgSlice) (esm *ESM, err error) {
 	return
 }
 
-func findESM(id string) (esm *ESM, pkgCSS bool, ok bool) {
+func findESM(id string) (esm *ESM, pkgCSS bool, err error) {
 	post, err := db.Get(q.Alias(id), q.Select("esm", "css"))
 	if err == nil {
 		err = json.Unmarshal(post.KV["esm"], &esm)
@@ -208,7 +204,6 @@ func findESM(id string) (esm *ESM, pkgCSS bool, ok bool) {
 		if val := post.KV["css"]; len(val) == 1 && val[0] == 1 {
 			pkgCSS = fileExists(path.Join(config.storageDir, "builds", strings.TrimSuffix(id, ".js")+".css"))
 		}
-		ok = true
 	}
 	return
 }

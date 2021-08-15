@@ -136,18 +136,15 @@ func query() rex.Handle {
 				storageType = "builds"
 			}
 
-		case ".ts", ".jsx", ".tsx", ".css":
-			if hasBuildVerPrefix {
-				if strings.HasSuffix(pathname, ".d.ts") {
-					storageType = "types"
-				} else {
-					storageType = "builds"
-				}
+		// todo: transform ts/jsx/tsx for browser
+		case ".ts", ".jsx", ".tsx":
+			if hasBuildVerPrefix && strings.HasSuffix(pathname, ".d.ts") {
+				storageType = "types"
 			} else if len(strings.Split(pathname, "/")) > 2 {
 				storageType = "raw"
 			}
 
-		case ".json", ".less", ".sass", ".scss", ".stylus", ".styl", ".wasm", ".xml", ".yaml", ".svg":
+		case ".json", ".css", ".less", ".sass", ".scss", ".stylus", ".styl", ".wasm", ".xml", ".yaml", ".svg", ".png", ".eot", ".ttf", ".woff", ".woff2":
 			if len(strings.Split(pathname, "/")) > 2 {
 				storageType = "raw"
 			}
@@ -157,7 +154,7 @@ func query() rex.Handle {
 		if storageType == "raw" {
 			m, err := parsePkg(pathname)
 			if err != nil {
-				return throwErrorJS(ctx, err)
+				return err
 			}
 			if m.submodule != "" {
 				shouldRedirect := !regVersionPath.MatchString(pathname)
@@ -407,14 +404,14 @@ func query() rex.Handle {
 		}
 
 		taskID := task.ID()
-		esm, pkgCSS, ok := findESM(taskID)
-		if !ok {
+		esm, pkgCSS, err := findESM(taskID)
+		if err != nil {
 			if !isBare {
 				// find previous build version
 				for i := 0; i < VERSION; i++ {
 					id := fmt.Sprintf("v%d/%s", VERSION-(i+1), taskID[len(fmt.Sprintf("v%d/", VERSION)):])
-					esm, pkgCSS, ok = findESM(id)
-					if ok {
+					esm, pkgCSS, err = findESM(id)
+					if err == nil {
 						taskID = id
 						break
 					}
@@ -423,7 +420,7 @@ func query() rex.Handle {
 
 			// if the previous build exists and not in bare mode, then build current module in backgound,
 			// or wait the current build task for 30 seconds
-			if ok {
+			if err == nil {
 				queue.Add(task)
 			} else {
 				select {
