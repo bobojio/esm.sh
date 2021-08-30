@@ -144,7 +144,7 @@ func query() rex.Handle {
 				storageType = "raw"
 			}
 
-		case ".json", ".css", ".less", ".sass", ".scss", ".stylus", ".styl", ".wasm", ".xml", ".yaml", ".svg", ".png", ".eot", ".ttf", ".woff", ".woff2":
+		case ".json", ".css", ".pcss", "postcss", ".less", ".sass", ".scss", ".stylus", ".styl", ".wasm", ".xml", ".yaml", ".svg", ".png", ".eot", ".ttf", ".woff", ".woff2":
 			if len(strings.Split(pathname, "/")) > 2 {
 				storageType = "raw"
 			}
@@ -251,6 +251,7 @@ func query() rex.Handle {
 		target := strings.ToLower(strings.TrimSpace(ctx.Form.Value("target")))
 		if _, ok := targets[target]; !ok {
 			ua := ctx.R.UserAgent()
+			// todo: support nodejs
 			if strings.HasPrefix(ua, "Deno/") {
 				target = "deno"
 			} else {

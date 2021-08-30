@@ -11,6 +11,7 @@ import (
 var regBrowserVersion = regexp.MustCompile(`^([0-9]+)(?:\.([0-9]+))?(?:\.([0-9]+))?$`)
 
 var targets = map[string]api.Target{
+	"node":   api.ESNext,
 	"deno":   api.ESNext,
 	"esnext": api.ESNext,
 	"es2015": api.ES2015,
@@ -23,6 +24,7 @@ var targets = map[string]api.Target{
 }
 
 var engines = map[string]api.EngineName{
+	"node":    api.EngineNode,
 	"chrome":  api.EngineChrome,
 	"edge":    api.EngineEdge,
 	"firefox": api.EngineFirefox,
@@ -31,6 +33,7 @@ var engines = map[string]api.EngineName{
 }
 
 var jsFeatures = []compat.JSFeature{
+	compat.ArbitraryModuleNamespaceNames,
 	compat.ArraySpread,
 	compat.Arrow,
 	compat.AsyncAwait,
@@ -39,6 +42,7 @@ var jsFeatures = []compat.JSFeature{
 	compat.Class,
 	compat.ClassField,
 	compat.ClassPrivateAccessor,
+	compat.ClassPrivateBrandCheck,
 	compat.ClassPrivateField,
 	compat.ClassPrivateMethod,
 	compat.ClassPrivateStaticAccessor,
@@ -48,12 +52,14 @@ var jsFeatures = []compat.JSFeature{
 	compat.Const,
 	compat.DefaultArgument,
 	compat.Destructuring,
+	compat.DynamicImport,
 	compat.ExponentOperator,
 	compat.ExportStarAs,
 	compat.ForAwait,
 	compat.ForOf,
 	compat.Generator,
 	compat.Hashbang,
+	compat.ImportAssertions,
 	compat.ImportMeta,
 	compat.Let,
 	compat.LogicalAssignment,
@@ -110,6 +116,8 @@ func validateEngineFeatures(engine api.Engine) int {
 				version = append(version, patch)
 			}
 			switch engine.Name {
+			case api.EngineNode:
+				constraints[compat.Node] = version
 			case api.EngineChrome:
 				constraints[compat.Chrome] = version
 			case api.EngineEdge:

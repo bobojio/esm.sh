@@ -30,6 +30,31 @@ type buildTask struct {
 	bundle bool
 }
 
+func (task *buildTask) aliasPrefix() string {
+	alias := []string{}
+	if len(task.alias) > 0 {
+		var ss sort.StringSlice
+		for name, to := range task.alias {
+			ss = append(ss, fmt.Sprintf("%s:%s", name, to))
+		}
+		ss.Sort()
+		alias = append(alias, fmt.Sprintf("alias:%s", strings.Join(ss, ",")))
+
+	}
+	if len(task.deps) > 0 {
+		var ss sort.StringSlice
+		for _, pkg := range task.deps {
+			ss = append(ss, fmt.Sprintf("%s@%s", pkg.name, pkg.version))
+		}
+		ss.Sort()
+		alias = append(alias, fmt.Sprintf("deps:%s", strings.Join(ss, ",")))
+	}
+	if len(alias) > 0 {
+		return fmt.Sprintf("X-%s/", btoaUrl(strings.Join(alias, ",")))
+	}
+	return ""
+}
+
 func (task *buildTask) ID() string {
 	if task.id != "" {
 		return task.id
@@ -37,8 +62,7 @@ func (task *buildTask) ID() string {
 
 	pkg := task.pkg
 	name := path.Base(pkg.name)
-	query := ""
-	qs := []string{}
+
 	if pkg.submodule != "" {
 		name = pkg.submodule
 	}
@@ -51,40 +75,20 @@ func (task *buildTask) ID() string {
 	if task.bundle {
 		name += ".bundle"
 	}
-	if len(task.alias) > 0 {
-		var ss sort.StringSlice
-		for name, to := range task.alias {
-			ss = append(ss, fmt.Sprintf("%s:%s", name, to))
-		}
-		ss.Sort()
-		qs = append(qs, fmt.Sprintf("alias:%s", strings.Join(ss, ",")))
-
-	}
-	if len(task.deps) > 0 {
-		var ss sort.StringSlice
-		for _, pkg := range task.deps {
-			ss = append(ss, fmt.Sprintf("%s@%s", pkg.name, pkg.version))
-		}
-		ss.Sort()
-		qs = append(qs, fmt.Sprintf("deps:%s", strings.Join(ss, ",")))
-	}
-	if len(qs) > 0 {
-		query = fmt.Sprintf("X-%s/", btoaUrl(strings.Join(qs, ",")))
-	}
 
 	task.id = fmt.Sprintf(
 		"v%d/%s@%s/%s%s/%s.js",
 		VERSION,
 		pkg.name,
 		pkg.version,
-		query,
+		task.aliasPrefix(),
 		task.target,
 		name,
 	)
 	return task.id
 }
 
-func (task *buildTask) getImportPath(pkg pkg) string {
+func (task *buildTask) getImportPath(pkg pkg, extendsAlias bool) string {
 	name := path.Base(pkg.name)
 	if pkg.submodule != "" {
 		name = pkg.submodule
@@ -96,11 +100,17 @@ func (task *buildTask) getImportPath(pkg pkg) string {
 		name += ".development"
 	}
 
+	var aliasPrefix string
+	if extendsAlias {
+		aliasPrefix = task.aliasPrefix()
+	}
+
 	return fmt.Sprintf(
-		"/v%d/%s@%s/%s/%s.js",
+		"/v%d/%s@%s/%s%s/%s.js",
 		VERSION,
 		pkg.name,
 		pkg.version,
+		aliasPrefix,
 		task.target,
 		name,
 	)
@@ -185,10 +195,17 @@ func (task *buildTask) build(tracing *stringSet) (esm *ESM, pkgCSS bool, err err
 				api.OnResolveOptions{Filter: ".*"},
 				func(args api.OnResolveArgs) (api.OnResolveResult, error) {
 					specifier := strings.TrimSuffix(args.Path, "/")
+
+					// resolve `?alias` parameter
 					if len(task.alias) > 0 {
 						if name, ok := task.alias[specifier]; ok {
 							specifier = name
 						}
+					}
+
+					// support nodejs builtin modules like `node:path`
+					if strings.HasPrefix(specifier, "node:") {
+						specifier = strings.TrimPrefix(specifier, "node:")
 					}
 
 					// bundles all dependencies except in `bundle` mode, apart from peer dependencies
@@ -280,7 +297,9 @@ esbuild:
 		MinifySyntax:      minify,
 		Plugins:           []api.Plugin{esmResolverPlugin},
 	}
-	if task.target != "node" {
+	if task.target == "node" {
+		options.Platform = api.PlatformNode
+	} else {
 		options.Define = define
 	}
 	if entryPoint != "" {
@@ -354,12 +373,14 @@ esbuild:
 					subTask := buildTask{
 						wd:     task.wd,
 						pkg:    subPkg,
+						alias:  task.alias,
+						deps:   task.deps,
 						target: task.target,
 						isDev:  task.isDev,
 					}
 					_, _, e := subTask.build(tracing)
 					if e == nil {
-						importPath = task.getImportPath(subPkg)
+						importPath = task.getImportPath(subPkg, true)
 					}
 				}
 				// is builtin `buffer` module
@@ -388,7 +409,7 @@ esbuild:
 								name:      p.Name,
 								version:   p.Version,
 								submodule: submodule,
-							})
+							}, false)
 						} else {
 							f, err := embedFS.Open(fmt.Sprintf("embed/polyfills/node_%s.js", name))
 							if err == nil {
@@ -416,7 +437,7 @@ esbuild:
 								name:      dep.name,
 								version:   dep.version,
 								submodule: submodule,
-							})
+							}, false)
 							break
 						}
 					}
@@ -449,6 +470,8 @@ esbuild:
 								version:   p.Version,
 								submodule: submodule,
 							},
+							alias:  task.alias,
+							deps:   task.deps,
 							target: task.target,
 							isDev:  task.isDev,
 						}
@@ -458,7 +481,7 @@ esbuild:
 								name:      p.Name,
 								version:   p.Version,
 								submodule: submodule,
-							})
+							}, false)
 						}
 					}
 				}
@@ -476,7 +499,7 @@ esbuild:
 							name:      p.Name,
 							version:   p.Version,
 							submodule: submodule,
-						})
+						}, false)
 					}
 				}
 				if importPath == "" {
@@ -627,56 +650,48 @@ func (task *buildTask) handleDTS(esm *ESM) (err error) {
 	versionedName := fmt.Sprintf("%s@%s", esm.Name, esm.Version)
 	nodeModulesDir := path.Join(task.wd, "node_modules")
 
-	var types string
+	var dts string
 	if esm.Types != "" || esm.Typings != "" {
-		types = getTypesPath(task.wd, *esm.NpmPackage, "")
+		dts = getTypesPath(task.wd, *esm.NpmPackage, "")
 	} else if submodule == "" {
 		if fileExists(path.Join(nodeModulesDir, name, "index.d.ts")) {
-			types = fmt.Sprintf("%s/%s", versionedName, "index.d.ts")
+			dts = fmt.Sprintf("%s/%s", versionedName, "index.d.ts")
 		} else if !strings.HasPrefix(name, "@") {
 			packageFile := path.Join(nodeModulesDir, "@types", name, "package.json")
 			if fileExists(packageFile) {
 				var p NpmPackage
 				err := utils.ParseJSONFile(path.Join(nodeModulesDir, "@types", name, "package.json"), &p)
 				if err == nil {
-					types = getTypesPath(task.wd, p, "")
+					dts = getTypesPath(task.wd, p, "")
 				}
 			}
 		}
 	} else {
 		if fileExists(path.Join(nodeModulesDir, name, submodule, "index.d.ts")) {
-			types = fmt.Sprintf("%s/%s", versionedName, path.Join(submodule, "index.d.ts"))
+			dts = fmt.Sprintf("%s/%s", versionedName, path.Join(submodule, "index.d.ts"))
 		} else if fileExists(path.Join(nodeModulesDir, name, ensureSuffix(submodule, ".d.ts"))) {
-			types = fmt.Sprintf("%s/%s", versionedName, ensureSuffix(submodule, ".d.ts"))
+			dts = fmt.Sprintf("%s/%s", versionedName, ensureSuffix(submodule, ".d.ts"))
 		} else if fileExists(path.Join(nodeModulesDir, "@types", name, submodule, "index.d.ts")) {
-			types = fmt.Sprintf("@types/%s/%s", versionedName, path.Join(submodule, "index.d.ts"))
+			dts = fmt.Sprintf("@types/%s/%s", versionedName, path.Join(submodule, "index.d.ts"))
 		} else if fileExists(path.Join(nodeModulesDir, "@types", name, ensureSuffix(submodule, ".d.ts"))) {
-			types = fmt.Sprintf("@types/%s/%s", versionedName, ensureSuffix(submodule, ".d.ts"))
+			dts = fmt.Sprintf("@types/%s/%s", versionedName, ensureSuffix(submodule, ".d.ts"))
 		}
 	}
-	if types == "" {
+	if dts == "" {
 		return
 	}
 
-	var prefix string
-	if len(task.deps) > 0 {
-		var ss sort.StringSlice
-		for _, pkg := range task.deps {
-			ss = append(ss, fmt.Sprintf("%s@%s", pkg.name, pkg.version))
-		}
-		ss.Sort()
-		prefix = fmt.Sprintf("deps=%s/", strings.Join(ss, ","))
-	}
+	aliasPrefix := task.aliasPrefix()
 	err = CopyDTS(
 		task.wd,
-		prefix,
-		types,
+		aliasPrefix,
+		dts,
 	)
 	if err != nil {
-		err = fmt.Errorf("copyDTS(%s:%s): %v", esm.Name, types, err)
+		err = fmt.Errorf("copyDTS(%s:%s): %v", esm.Name, dts, err)
 		return
 	}
-	esm.Dts = fmt.Sprintf("/%s%s", prefix, types)
+	esm.Dts = fmt.Sprintf("/%s%s", aliasPrefix, dts)
 	log.Debugf("copy dts %s in %v", esm.Dts, time.Now().Sub(start))
 	return
 }
