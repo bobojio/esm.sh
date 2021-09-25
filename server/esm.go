@@ -13,7 +13,6 @@ import (
 	"github.com/ije/esbuild-internal/logger"
 	"github.com/ije/esbuild-internal/test"
 	"github.com/ije/gox/utils"
-	"github.com/postui/postdb/q"
 )
 
 // ESM defines the ES Module meta
@@ -22,39 +21,11 @@ type ESM struct {
 	ExportDefault bool     `json:"exportDefault"`
 	Exports       []string `json:"exports"`
 	Dts           string   `json:"dts"`
+	PackageCSS    bool     `json:"packageCSS"`
 }
 
-func initESM(wd string, pkg pkg, deps pkgSlice, nodeEnv string) (esm *ESM, err error) {
-	versions := map[string]string{}
-	for _, dep := range deps {
-		versions[dep.name] = dep.version
-	}
-
+func initESM(wd string, pkg pkg, checkExports bool, isDev bool) (esm *ESM, err error) {
 	packageFile := path.Join(wd, "node_modules", pkg.name, "package.json")
-	install := !fileExists(packageFile)
-	if install {
-		installList := []string{
-			fmt.Sprintf("%s@%s", pkg.name, pkg.version),
-		}
-		if !strings.HasPrefix(pkg.name, "@") {
-			var info NpmPackage
-			info, _, err = node.getPackageInfo("@types/"+pkg.name, "latest")
-			if err != nil && err.Error() != fmt.Sprintf("npm: package '@types/%s' not found", pkg.name) {
-				return
-			}
-			if info.Types != "" || info.Typings != "" || info.Main != "" {
-				if version, ok := versions[info.Name]; ok {
-					installList = append(installList, fmt.Sprintf("%s@%s", info.Name, version))
-				} else {
-					installList = append(installList, fmt.Sprintf("%s@%s", info.Name, info.Version))
-				}
-			}
-		}
-		err = yarnAdd(wd, installList...)
-		if err != nil {
-			return
-		}
-	}
 
 	var p NpmPackage
 	err = utils.ParseJSONFile(packageFile, &p)
@@ -67,94 +38,117 @@ func initESM(wd string, pkg pkg, deps pkgSlice, nodeEnv string) (esm *ESM, err e
 	}
 
 	if pkg.submodule != "" {
-		packageFile := path.Join(wd, "node_modules", esm.Name, pkg.submodule, "package.json")
-		if fileExists(packageFile) {
-			var p NpmPackage
-			err = utils.ParseJSONFile(packageFile, &p)
-			if err != nil {
-				return
-			}
-			if p.Main != "" {
-				esm.Main = path.Join(pkg.submodule, p.Main)
+		if strings.HasSuffix(pkg.submodule, ".d.ts") {
+			esm.Typings = ""
+			if strings.HasSuffix(pkg.submodule, "...d.ts") {
+				submodule := strings.TrimSuffix(pkg.submodule, "...d.ts")
+				subDir := path.Join(wd, "node_modules", esm.Name, submodule)
+				if fileExists(path.Join(subDir, "index.d.ts")) {
+					esm.Types = path.Join(submodule, "index.d.ts")
+				} else if fileExists(path.Join(subDir + ".d.ts")) {
+					esm.Types = submodule + ".d.ts"
+				}
 			} else {
-				esm.Main = ""
-			}
-			np := fixNpmPackage(p)
-			if np.Module != "" {
-				esm.Module = path.Join(pkg.submodule, np.Module)
-			} else {
-				esm.Module = ""
-			}
-			if p.Types != "" {
-				esm.Types = path.Join(pkg.submodule, p.Types)
-			} else {
-				esm.Types = ""
-			}
-			if p.Typings != "" {
-				esm.Typings = path.Join(pkg.submodule, p.Typings)
-			} else {
-				esm.Typings = ""
+				esm.Types = pkg.submodule
 			}
 		} else {
-			var defined bool
-			if p.DefinedExports != nil {
-				if m, ok := p.DefinedExports.(map[string]interface{}); ok {
-					for name, v := range m {
-						/**
-						exports: {
-							"./lib/core": {
-								"require": "./lib/core.js",
-								"import": "./es/core.js"
-							}
-						}
-						*/
-						if name == "./"+pkg.submodule {
-							useDefinedExports(esm.NpmPackage, v)
-							defined = true
-							break
+			subDir := path.Join(wd, "node_modules", esm.Name, pkg.submodule)
+			packageFile := path.Join(subDir, "package.json")
+			if fileExists(packageFile) {
+				var p NpmPackage
+				err = utils.ParseJSONFile(packageFile, &p)
+				if err != nil {
+					return
+				}
+				np := fixNpmPackage(p)
+				if np.Module != "" {
+					esm.Module = path.Join(pkg.submodule, np.Module)
+				} else {
+					esm.Module = ""
+				}
+				if p.Main != "" {
+					esm.Main = path.Join(pkg.submodule, p.Main)
+				} else {
+					esm.Main = path.Join(pkg.submodule, "index.js")
+				}
+				esm.Types = ""
+				esm.Typings = ""
+				if p.Types != "" {
+					esm.Types = path.Join(pkg.submodule, p.Types)
+				} else if p.Typings != "" {
+					esm.Typings = path.Join(pkg.submodule, p.Typings)
+				} else if fileExists(path.Join(subDir, "index.d.ts")) {
+					esm.Types = path.Join(pkg.submodule, "index.d.ts")
+				} else if fileExists(path.Join(subDir + ".d.ts")) {
+					esm.Types = pkg.submodule + ".d.ts"
+				}
+			} else {
+				var defined bool
+				if p.DefinedExports != nil {
+					if m, ok := p.DefinedExports.(map[string]interface{}); ok {
+						for name, v := range m {
 							/**
 							exports: {
-								"./lib/languages/*": {
-									"require": "./lib/languages/*.js",
-									"import": "./es/languages/*.js"
-								},
-							}
-							*/
-						} else if strings.HasSuffix(name, "/*") && strings.HasPrefix("./"+pkg.submodule, strings.TrimSuffix(name, "*")) {
-							suffix := strings.TrimPrefix("./"+pkg.submodule, strings.TrimSuffix(name, "*"))
-							if m, ok := v.(map[string]interface{}); ok {
-								for key, value := range m {
-									s, ok := value.(string)
-									if ok {
-										m[key] = strings.Replace(s, "*", suffix, -1)
-									}
+								"./lib/core": {
+									"require": "./lib/core.js",
+									"import": "./es/core.js"
 								}
 							}
-							useDefinedExports(esm.NpmPackage, v)
-							defined = true
+							*/
+							if name == "./"+pkg.submodule {
+								resolveDefinedExports(esm.NpmPackage, v)
+								defined = true
+								break
+								/**
+								exports: {
+									"./lib/languages/*": {
+										"require": "./lib/languages/*.js",
+										"import": "./es/languages/*.js"
+									},
+								}
+								*/
+							} else if strings.HasSuffix(name, "/*") && strings.HasPrefix("./"+pkg.submodule, strings.TrimSuffix(name, "*")) {
+								suffix := strings.TrimPrefix("./"+pkg.submodule, strings.TrimSuffix(name, "*"))
+								if m, ok := v.(map[string]interface{}); ok {
+									for key, value := range m {
+										s, ok := value.(string)
+										if ok {
+											m[key] = strings.Replace(s, "*", suffix, -1)
+										}
+									}
+								}
+								resolveDefinedExports(esm.NpmPackage, v)
+								defined = true
+							}
 						}
 					}
 				}
-			}
-			if !defined {
-				if esm.Main != "" {
-					esm.Main = path.Join(path.Dir(esm.Main), pkg.submodule)
-				} else {
-					esm.Main = "./" + pkg.submodule
+				if !defined {
+					if esm.Module != "" {
+						esm.Module = pkg.submodule
+					} else {
+						esm.Main = pkg.submodule
+					}
+					esm.Types = ""
+					esm.Typings = ""
+					if fileExists(path.Join(subDir, "index.d.ts")) {
+						esm.Types = path.Join(pkg.submodule, "index.d.ts")
+					} else if fileExists(path.Join(subDir + ".d.ts")) {
+						esm.Types = pkg.submodule + ".d.ts"
+					}
 				}
-				if esm.Module != "" {
-					esm.Module = path.Join(path.Dir(esm.Module), pkg.submodule)
-				}
-				esm.Types = ""
-				esm.Typings = ""
 			}
 		}
+	}
+
+	if !checkExports {
+		return
 	}
 
 	if esm.Module != "" {
 		resolved, exportDefault, err := checkESM(wd, esm.Name, esm.Module)
 		if err != nil {
-			log.Warnf("fake module from '%s' of %s: %v", esm.Module, esm.Name, err)
+			log.Warnf("fake module from '%s' of '%s': %v", esm.Module, esm.Name, err)
 			esm.Module = ""
 		} else {
 			esm.Module = resolved
@@ -163,6 +157,10 @@ func initESM(wd string, pkg pkg, deps pkgSlice, nodeEnv string) (esm *ESM, err e
 	}
 
 	if esm.Module == "" {
+		nodeEnv := "production"
+		if isDev {
+			nodeEnv = "development"
+		}
 		ret, err := parseCJSModuleExports(wd, pkg.ImportPath(), nodeEnv)
 		if err != nil {
 			return nil, fmt.Errorf("parseCJSModuleExports: %v", err)
@@ -187,22 +185,20 @@ func initESM(wd string, pkg pkg, deps pkgSlice, nodeEnv string) (esm *ESM, err e
 	return
 }
 
-func findESM(id string) (esm *ESM, pkgCSS bool, err error) {
-	post, err := db.Get(q.Alias(id), q.Select("esm", "css"))
+func findESM(id string) (esm *ESM, err error) {
+	store, _, err := db.Get(id)
 	if err == nil {
-		err = json.Unmarshal(post.KV["esm"], &esm)
+		err = json.Unmarshal([]byte(store["esm"]), &esm)
 		if err != nil {
-			db.Delete(q.Alias(id))
+			db.Delete(id)
 			return
 		}
 
-		if !fileExists(path.Join(config.storageDir, "builds", id)) {
-			db.Delete(q.Alias(id))
+		var exists bool
+		exists, _, err = fs.Exists(path.Join("builds", id))
+		if !exists {
+			db.Delete(id)
 			return
-		}
-
-		if val := post.KV["css"]; len(val) == 1 && val[0] == 1 {
-			pkgCSS = fileExists(path.Join(config.storageDir, "builds", strings.TrimSuffix(id, ".js")+".css"))
 		}
 	}
 	return
@@ -232,7 +228,7 @@ func checkESM(wd string, packageName string, moduleSpecifier string) (resolveNam
 	if pass {
 		esm := ast.ExportsKind == js_ast.ExportsESM
 		if !esm {
-			err = errors.New("not module")
+			err = errors.New("not a module")
 			return
 		}
 		for name := range ast.NamedExports {

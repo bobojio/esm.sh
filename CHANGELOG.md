@@ -1,5 +1,76 @@
 # Change Log
 
+## v53
+
+- Add `Cache-Tag` header for CDN purge
+- Add **s3** storage support ([#153](https://github.com/postui/esm.sh/issues/153))
+- Fix `require` replacement ([#154](https://github.com/postui/esm.sh/issues/154))
+
+## v52
+
+- Fix types build ([#149](https://github.com/postui/esm.sh/issues/149))
+- Use `stream` and `events` from deno std/node ([#136](https://github.com/postui/esm.sh/issues/148)) @talentlessguy
+- Fix `localLRU` and allow for `memoryLRU` ([#148](https://github.com/postui/esm.sh/issues/148)) @jimisaacs
+
+## v51
+
+- Fix build breaking change in v50 ([#131](https://github.com/postui/esm.sh/issues/131)).
+- Add `localLRU` **FS** layer ([#126](https://github.com/postui/esm.sh/issues/126))
+- Add a `Cache Interface` that is using to store temporary data like npm packages info.
+- Do not try to build `/favicon.ico` ([#132](https://github.com/postui/esm.sh/issues/132))
+- Add lovely `pixi.js`, `three.js` and `@material-ui/core` testing by @jimisaacs ([#134](https://github.com/postui/esm.sh/issues/134), [#139](https://github.com/postui/esm.sh/issuGes/139)).
+
+## v50
+
+- Improve build performance to burn the server CPU cores! Before this, to build a module to ESM which has heavy deps maybe very slow since the single build task only uses one CPU core.
+- Rewrite the **dts transformer** to get better deno types compatibility and faster transpile speed.
+- Add Deno **testing CI** on Github.
+
+## v49
+
+- Improve the build process to fix an edge case reported in [#118](https://github.com/postui/esm.sh/issues/118)
+	```js
+	const Parser = require('htmlparser').Parser;
+	```
+	esm (v48) output:
+	```js
+	import htmlparser2 from '/v48/htmlparser2@5.0.0/es2021/htmlparser2.js'
+	const Parser = htmlparser2.Parser; // parser is undefined
+	```
+	the expected output was fixed in v49:
+	```js
+	import { Parser as htmlparser2Parser } from '/v48/htmlparser2@5.0.0/es2021/htmlparser2.js'
+	const Parser = htmlparser2Parser; // parser is a class
+	```
+- Add more polyfills for Deno, huge thanks to @talentlessguy ([#117](https://github.com/postui/esm.sh/issues/117))
+  - path
+  - querystring
+  - url
+  - timers
+-	Better self-hosting options improved by @jimisaacs, super! ([#116](https://github.com/postui/esm.sh/issues/116), [#119](https://github.com/postui/esm.sh/issues/116), [#120](https://github.com/postui/esm.sh/issues/120), [#122](https://github.com/postui/esm.sh/issues/122))
+- Add **Unlimted(max 1PB) Storage** to store builds and cache via NFS on esm.sh back server behind Cloudflare
+
+## v48
+
+- Improve **cjs-lexer** service to handle the edge case is shown below:
+	```js
+	function debounce() {};
+	debounce.debounce = debounce;
+	module.exports = debounce;
+	```
+	esm output:
+	```js
+	export { debounce } // this was missed
+	export default debounce
+	```
+- Ignore `?target` in Deno (fix [#109](https://github.com/postui/esm.sh/issues/109))
+- Add **Storage Interface** to store data to anywhere (currently only support [postdb](https://github.com/postui/postdb) + local FS)
+
+## v47
+
+- Improve dts transformer to use cdn domain (fix [#104](https://github.com/postui/esm.sh/issues/104))
+- Update polyfills (fix [#105](https://github.com/postui/esm.sh/issues/105))
+
 ## v46
 
 - Split modules based on exports defines (ref [#78](https://github.com/postui/esm.sh/issues/78))

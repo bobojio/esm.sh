@@ -16,16 +16,17 @@ import (
 	"strings"
 	"time"
 
+	"esm.sh/server/storage"
+
 	"github.com/ije/gox/utils"
-	"github.com/postui/postdb"
-	"github.com/postui/postdb/q"
 )
 
 const (
 	minNodejsVersion = 14
 	nodejsLatestLTS  = "14.17.5"
+	nodeTypesVersion = "16.9.1"
 	nodejsDistURL    = "https://nodejs.org/dist/"
-	refreshDuration  = 10 * 60 // 10 minues
+	refreshDuration  = 5 * 60 // 5 minues
 )
 
 var builtInNodeModules = map[string]bool{
@@ -76,11 +77,6 @@ var builtInNodeModules = map[string]bool{
 	"zlib":                true,
 }
 
-// status: https://deno.land/std/node
-var denoStdNodeModules = map[string]bool{
-	"fs": true,
-}
-
 // copy from https://github.com/webpack/webpack/blob/master/lib/ModuleNotFoundError.js#L13
 var polyfilledBuiltInNodeModules = map[string]string{
 	"assert":              "assert",
@@ -98,6 +94,7 @@ var polyfilledBuiltInNodeModules = map[string]string{
 	"process":             "process/browser",
 	"querystring":         "querystring-es3",
 	"stream":              "stream-browserify",
+	"stream/web":          "web-streams-polyfill",
 	"_stream_duplex":      "readable-stream/duplex",
 	"_stream_passthrough": "readable-stream/passthrough",
 	"_stream_readable":    "readable-stream/readable",
@@ -111,6 +108,19 @@ var polyfilledBuiltInNodeModules = map[string]string{
 	"util":                "util",
 	"vm":                  "vm-browserify",
 	"zlib":                "browserify-zlib",
+}
+
+// status: https://deno.land/std/node
+var denoStdNodeModules = map[string]bool{
+	"fs":            true,
+	"child_process": true,
+	"path":          true,
+	"querystring":   true,
+	"timers":        true,
+	"stream":        true,
+	"events":        true,
+	"module":        true,
+	// "url":           true, // format is missing
 }
 
 // NpmPackageRecords defines version records of a npm package
@@ -139,22 +149,22 @@ type Node struct {
 	npmRegistry string
 }
 
-func checkNode() (node *Node, err error) {
+func checkNode(installDir string) (node *Node, err error) {
 	var installed bool
 CheckNodejs:
 	version, major, err := getNodejsVersion()
 	if err != nil || major < minNodejsVersion {
 		PATH := os.Getenv("PATH")
-		nodeBinDir := "/usr/local/nodejs/bin"
+		nodeBinDir := path.Join(installDir, "bin")
 		if !strings.Contains(PATH, nodeBinDir) {
 			os.Setenv("PATH", fmt.Sprintf("%s%c%s", nodeBinDir, os.PathListSeparator, PATH))
 			goto CheckNodejs
 		} else if !installed {
-			err = os.RemoveAll("/usr/local/nodejs")
+			err = os.RemoveAll(installDir)
 			if err != nil {
 				return
 			}
-			err = installNodejs("/usr/local/nodejs", nodejsLatestLTS)
+			err = installNodejs(installDir, nodejsLatestLTS)
 			if err != nil {
 				return
 			}
@@ -195,7 +205,7 @@ CheckYarn:
 	return
 }
 
-func (node *Node) getPackageInfo(name string, version string) (info NpmPackage, submodule string, err error) {
+func getPackageInfo(wd string, name string, version string) (info NpmPackage, submodule string, formPackageJSON bool, err error) {
 	slice := strings.Split(name, "/")
 	if l := len(slice); strings.HasPrefix(name, "@") && l > 1 {
 		name = strings.Join(slice[:2], "/")
@@ -208,21 +218,42 @@ func (node *Node) getPackageInfo(name string, version string) (info NpmPackage, 
 			submodule = strings.Join(slice[1:], "/")
 		}
 	}
-	version = resolveVersion(version)
-	isFullVersion := regFullVersion.MatchString(version)
-	key := fmt.Sprintf("npm:%s@%s", name, version)
-	p, err := db.Get(q.Alias(key), q.Select("package"))
-	if err == nil {
-		if isFullVersion || int64(p.Modtime)+refreshDuration > time.Now().Unix() {
-			if json.Unmarshal(p.KV["package"], &info) == nil {
+
+	if name == "@types/node" {
+		info = NpmPackage{
+			Name:    "@types/node",
+			Version: nodeTypesVersion,
+			Types:   "index.d.ts",
+		}
+		return
+	}
+
+	if wd != "" {
+		pkgJsonPath := path.Join(wd, "node_modules", name, "package.json")
+		if fileExists(pkgJsonPath) {
+			err = utils.ParseJSONFile(pkgJsonPath, &info)
+			if err == nil {
+				formPackageJSON = true
 				return
 			}
 		}
 	}
-	if err != nil && err != postdb.ErrNotFound {
+
+	version = resolveVersion(version)
+
+	data, err := cache.Get(fmt.Sprintf("npm:%s@%s", name, version))
+	if err == nil && json.Unmarshal(data, &info) == nil {
 		return
 	}
+	if err != nil && err != storage.ErrNotFound && err != storage.ErrExpired {
+		log.Error("db:", err)
+	}
 
+	info, err = cachePackageInfo(name, version)
+	return
+}
+
+func cachePackageInfo(name string, version string) (info NpmPackage, err error) {
 	start := time.Now()
 	resp, err := httpClient.Get(node.npmRegistry + name)
 	if err != nil {
@@ -254,6 +285,7 @@ func (node *Node) getPackageInfo(name string, version string) (info NpmPackage, 
 		return
 	}
 
+	isFullVersion := regFullVersion.MatchString(version)
 	if isFullVersion {
 		info = h.Versions[version]
 	} else {
@@ -281,14 +313,18 @@ func (node *Node) getPackageInfo(name string, version string) (info NpmPackage, 
 		return
 	}
 
-	// update cache
-	if _, err := db.Get(q.Alias(key)); err == nil {
-		db.Update(q.Alias(key), q.KV{"package": utils.MustEncodeJSON(info)})
-	} else {
-		db.Put(q.Alias(key), q.KV{"package": utils.MustEncodeJSON(info)})
-	}
+	log.Debugf("get npm package(%s@%s) info from %s in %v", name, info.Version, node.npmRegistry, time.Now().Sub(start))
 
-	log.Debugf("get npm package(%s@%s) info in %v", name, info.Version, time.Now().Sub(start))
+	// cache data
+	var ttl time.Duration = 0
+	if !isFullVersion {
+		ttl = refreshDuration * time.Second
+	}
+	cache.Set(
+		fmt.Sprintf("npm:%s@%s", name, version),
+		utils.MustEncodeJSON(info),
+		ttl,
+	)
 	return
 }
 
@@ -340,7 +376,7 @@ func getNodejsVersion() (version string, major int, err error) {
 }
 
 // see https://nodejs.org/api/packages.html
-func useDefinedExports(p *NpmPackage, exports interface{}) {
+func resolveDefinedExports(p *NpmPackage, exports interface{}) {
 	s, ok := exports.(string)
 	if ok {
 		if p.Type == "module" && p.Module == "" {
@@ -391,11 +427,11 @@ func fixNpmPackage(p NpmPackage) *NpmPackage {
 	np := &p
 
 	if p.Module == "" && p.DefinedExports != nil {
-		useDefinedExports(np, p.DefinedExports)
+		resolveDefinedExports(np, p.DefinedExports)
 		if m, ok := p.DefinedExports.(map[string]interface{}); ok {
 			v, ok := m["."]
 			if ok {
-				useDefinedExports(np, v)
+				resolveDefinedExports(np, v)
 			}
 		}
 	}
@@ -449,9 +485,22 @@ func installNodejs(dir string, version string) (err error) {
 func yarnAdd(wd string, packages ...string) (err error) {
 	if len(packages) > 0 {
 		start := time.Now()
-		args := []string{"add", "--silent", "--no-progress", "--ignore-scripts"}
-		if config.yarnCacheDir != "" {
-			args = append(args, "--cache-folder", config.yarnCacheDir)
+		args := []string{
+			"add",
+			"--non-interactive",
+			"--no-progress",
+			"--no-bin-links",
+			"--ignore-scripts",
+			"--ignore-platform",
+			"--ignore-engines",
+		}
+		yarnCacheDir := os.Getenv("YARN_CACHE_DIR")
+		if yarnCacheDir != "" {
+			args = append(args, "--cache-folder", yarnCacheDir)
+		}
+		yarnMutex := os.Getenv("YARN_MUTEX")
+		if yarnMutex != "" {
+			args = append(args, "--mutex", yarnMutex)
 		}
 		cmd := exec.Command("yarn", append(args, packages...)...)
 		cmd.Dir = wd
@@ -462,4 +511,12 @@ func yarnAdd(wd string, packages ...string) (err error) {
 		log.Debug("yarn add", strings.Join(packages, " "), "in", time.Now().Sub(start))
 	}
 	return
+}
+
+// provided by @jimisaacs
+func toTypesPackageName(pkgName string) string {
+	if strings.HasPrefix(pkgName, "@") {
+		pkgName = strings.Replace(pkgName[1:], "/", "__", 1)
+	}
+	return "@types/" + pkgName
 }

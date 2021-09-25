@@ -1,6 +1,6 @@
 # ESM
 
-A fast, global content delivery network to transform [NPM](http://npmjs.org/) packges to standard **ES Modules** by [esbuild](https://github.com/evanw/esbuild).
+A fast, global content delivery network to transform [NPM](http://npmjs.org/) packages to standard **ES Modules** by [esbuild](https://github.com/evanw/esbuild).
 
 ## Import from URL
 
@@ -14,7 +14,7 @@ import React from 'https://esm.castle.guiguan.net/react'
 import React from 'https://esm.castle.guiguan.net/react@17.0.2'
 ```
 
-or use a major version:
+or import a major version:
 
 ```javascript
 import React from 'https://esm.castle.guiguan.net/react@17'
@@ -38,7 +38,7 @@ import 'https://esm.castle.guiguan.net/tailwindcss/dist/tailwind.min.css'
 import { Button } from 'https://esm.castle.guiguan.net/antd?bundle'
 ```
 
-In **bundle** mode, all dependencies will be bundled into one JS file.
+In **bundle** mode, all dependencies will be bundled into a single JS file.
 
 ### Development mode
 
@@ -46,7 +46,7 @@ In **bundle** mode, all dependencies will be bundled into one JS file.
 import React from 'https://esm.castle.guiguan.net/react?dev'
 ```
 
-The `?dev` mode builds code with `NODE_ENV` equals to `development`, that is useful to build modules like **React** to allow you get more development warn/error messages.
+The `?dev` mode builds code with `process.env.NODE_ENV` equals to `development`, that is useful to build modules like **React** to allow you get more development warn/error details.
 
 ### Specify external dependencies
 
@@ -55,7 +55,7 @@ import React from 'https://esm.castle.guiguan.net/react@16.14.0'
 import useSWR from 'https://esm.castle.guiguan.net/swr?deps=react@16.14.0'
 ```
 
-By default, esm.sh rewrites import specifier based on the package's dependency statement. To specify version of dependencies you can use the `?deps=PACKAGE@VERSION` query, separate multiple dependencies with commas: `?deps=react@16.14.0,react-dom@16.14.0`.
+By default, esm.sh rewrites import specifier based on the package's dependency statement. To specify version of dependencies you can use the `?deps=PACKAGE@VERSION` query. You can separate multiple dependencies with commas: `?deps=react@16.14.0,react-dom@16.14.0`.
 
 ### Aliasing dependencies
 
@@ -93,7 +93,7 @@ This only works when the NPM module imports css files in JS directly.
 
 ## Deno compatibility
 
-**esm.sh** will resolve the node internal modules (**fs**, **os**, etc.) with [`deno.land/std/node`](https://deno.land/std/node) to support some packages working in Deno, like `postcss`:
+**esm.sh** will resolve the node internal modules (**fs**, **child_process**, etc.) with [`deno.land/std/node`](https://deno.land/std/node) to support some packages working in Deno, like `postcss`:
 
 ```javascript
 import postcss from 'https://esm.castle.guiguan.net/postcss'
@@ -103,12 +103,11 @@ const { css } = await postcss([ autoprefixer ]).process(`
   backdrop-filter: blur(5px);
   user-select: none;
 `).async()
-console.log(css)
 ```
 
 ### X-Typescript-Types
 
-By default, **esm.sh** will respond with a custom `X-TypeScript-Types` HTTP header when types (`.d.ts`) are defined. This is useful for deno type checks ([link](https://deno.land/manual/typescript/types#using-x-typescript-types-header)).
+By default, **esm.sh** will respond with a custom `X-TypeScript-Types` HTTP header when the types (`.d.ts`) is defined. This is useful for deno type checks ([link](https://deno.land/manual/typescript/types#using-x-typescript-types-header)).
 
 ![figure #1](./embed/assets/sceenshot-deno-types.png)
 
@@ -119,19 +118,10 @@ import unescape from 'https://esm.castle.guiguan.net/lodash/unescape?no-check'
 ```
 
 ## Network of esm.sh
+
 - Main server in HK
 - Global CDN by [Cloudflare](https://cloudflare.com)
-- China CDN by [Aliyun](https://aliyun.com) (use [mmdb_china_ip_list](https://github.com/alecthw/mmdb_china_ip_list) to split traffic)
 
 ## Self-Hosting
 
-You will need [Go](https://golang.org/dl) 1.16+ to compile the server, and ensure [supervisor](http://supervisord.org/) installed on your host machine.<br>
-The server runtime will install the nodejs (14 LTS) automatically.
-
-```bash
-$ git clone https://github.com/postui/esm.sh
-$ cd esm.sh
-$ sh ./scripts/deploy.sh
-```
-
-**Deploying with Docker:** An example [Dockerfile](./Dockerfile) is found in the root of this project.
+To host esm.sh by yourself, check [hosting](./HOSTING.md) documentation.

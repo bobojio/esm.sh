@@ -185,6 +185,22 @@ export async function test($el) {
     t.ok()
   })
 
+  _esm(['react@17', 'react-dom@17', 'html-to-react?deps=react@17'], async (t) => {
+    const [
+      { default: React },
+      { render },
+      { Parser }
+    ] = t.modules
+
+    const h = new Parser()
+    const App = () => {
+      return h.parse(`<span>html to react is amzing</span>`)
+    }
+    render(React.createElement(App), t.$span)
+
+    t.ok()
+  })
+
   _esm(['react@17', 'react-dom@17', 'antd?bundle'], async (t) => {
     const [
       { createElement, Fragment },
@@ -204,6 +220,26 @@ export async function test($el) {
         createElement('code', null, '<Spin />'),
         createElement('em', { style: { padding: '0 10px' } }, '→'),
         createElement(Spin, { size: 'small' }),
+      )
+    }
+    render(createElement(App), t.$span)
+
+    t.ok()
+  })
+
+  _esm(['react@17', 'react-dom@17', '@material-ui/core'], async (t) => {
+    const [
+      { createElement, useState },
+      { render },
+      { Button },
+    ] = t.modules
+
+    const App = () => {
+      const [count, setCount] = useState(0)
+      return createElement(
+        Button,
+        { size: 'small', variant: 'outlined', color: 'secondary', onClick: () => setCount(count + 1) },
+        `Clicked ${count}`
       )
     }
     render(createElement(App), t.$span)
@@ -339,6 +375,69 @@ export async function test($el) {
     t.$span.id = 'd3-span'
     d3.select('#d3-span').style('color', 'gray').text('d3')
 
+    t.ok()
+  })
+
+  _esm('pixi.js', async (t) => {
+    const { Application, Sprite } = t.modules
+
+    const app = new Application({ width: 30, height: 30, resolution: 2, backgroundAlpha: 0 });
+    app.loader.add('bunny', 'https://pixijs.io/examples/examples/assets/bunny.png').load((_, resources) => {
+      const bunny = new Sprite(resources.bunny.texture);
+      bunny.anchor.set(0.5);
+      bunny.scale.x = bunny.scale.y = 0.5;
+      bunny.x = app.screen.width / 2;
+      bunny.y = app.screen.height / 2;
+
+      app.ticker.add(() => {
+        bunny.rotation += 0.05;
+      });
+      
+      app.stage.addChild(bunny);
+      t.ok()
+    });
+
+    app.view.style.width = '30px'
+    app.view.style.height = '30px'
+    t.$span.appendChild(app.view);
+  })
+
+  _esm('three', async (t) => {
+    const {
+      Scene,
+      PerspectiveCamera,
+      WebGLRenderer,
+      BoxGeometry,
+      MeshBasicMaterial,
+      Mesh,
+    } = t.modules
+
+    const width = 30
+    const height = 30
+    const scene = new Scene();
+    const camera = new PerspectiveCamera(75, width / height, 0.1, 1000);
+    const renderer = new WebGLRenderer({ alpha: true });
+    const geometry = new BoxGeometry();
+    const material = new MeshBasicMaterial({ color: 0x000000, wireframe: true });
+    const cube = new Mesh(geometry, material);
+
+    renderer.setSize(width, height);
+    renderer.setPixelRatio(window.devicePixelRatio);
+    camera.position.z = 2;
+    scene.add(cube);
+
+    const update = function () {
+      requestAnimationFrame(update);
+
+      cube.rotation.x += 0.05;
+      cube.rotation.y += 0.05;
+
+      renderer.render(scene, camera);
+    };
+
+    update();
+
+    t.$span.appendChild(renderer.domElement);
     t.ok()
   })
 }
