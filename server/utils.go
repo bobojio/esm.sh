@@ -9,22 +9,15 @@ import (
 	"sync"
 
 	"github.com/ije/gox/utils"
+	"github.com/ije/gox/valid"
 )
 
 var (
-	regFullVersion      = regexp.MustCompile(`^\d+\.\d+\.\d+(\-[a-zA-Z0-9\.]+)*$`)
+	regFullVersion      = regexp.MustCompile(`^\d+\.\d+\.\d+[a-zA-Z0-9\.\-]*$`)
+	regVersionPath      = regexp.MustCompile(`([^/])@\d+\.\d+\.\d+([a-z0-9\.-]+)?/`)
 	regBuildVersionPath = regexp.MustCompile(`^/v\d+/`)
+	npmNaming           = valid.Validator{valid.FromTo{'a', 'z'}, valid.FromTo{'0', '9'}, valid.Eq('.'), valid.Eq('_'), valid.Eq('-')}
 )
-
-// A Country record of mmdb.
-type Country struct {
-	ISOCode string `maxminddb:"iso_code"`
-}
-
-// A Record of mmdb.
-type Record struct {
-	Country Country `maxminddb:"country"`
-}
 
 type stringSet struct {
 	lock sync.RWMutex
@@ -140,21 +133,14 @@ func endsWith(s string, suffixs ...string) bool {
 	return false
 }
 
-func ensureSuffix(path string, ext string) string {
-	if !strings.HasSuffix(path, ext) {
-		return path + ext
-	}
-	return path
+func dirExists(filepath string) bool {
+	fi, err := os.Lstat(filepath)
+	return err == nil && fi.IsDir()
 }
 
 func fileExists(filepath string) bool {
 	fi, err := os.Lstat(filepath)
 	return err == nil && !fi.IsDir()
-}
-
-func dirExists(filepath string) bool {
-	fi, err := os.Lstat(filepath)
-	return err == nil && fi.IsDir()
 }
 
 func ensureDir(dir string) (err error) {

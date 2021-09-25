@@ -1,67 +1,115 @@
 package server
 
 import (
-	"bufio"
 	"bytes"
 	"fmt"
-	"io"
 	"os"
 	"path"
-	"regexp"
 	"strconv"
 	"strings"
 
 	"github.com/ije/gox/utils"
 )
 
-var (
-	regVersionPath    = regexp.MustCompile(`([^/])@\d+\.\d+\.\d+([a-z0-9\.-]+)?/`)
-	regFromExpr       = regexp.MustCompile(`(}|\s)from\s*("|')`)
-	regImportCallExpr = regexp.MustCompile(`import\((('[^']+')|("[^"]+"))\)`)
-	regReferenceTag   = regexp.MustCompile(`^<reference\s+(path|types)\s*=\s*('|")([^'"]+)("|')\s*/>$`)
-	regDeclareModule  = regexp.MustCompile(`^declare\s+module\s*('|")([^'"]+)("|')`)
-)
-
-func CopyDTS(wd string, prefix string, dts string) (err error) {
-	return copyDTS(wd, prefix, dts, newStringSet())
+func CopyDTS(wd string, resolvePrefix string, dts string) (err error) {
+	return copyDTS(wd, resolvePrefix, dts, newStringSet())
 }
 
-func copyDTS(wd string, prefix string, dts string, tracing *stringSet) (err error) {
-	// don't repeat
-	if tracing.Has(prefix + "/" + dts) {
+func copyDTS(wd string, resolvePrefix string, dts string, tracing *stringSet) (err error) {
+	// don't copy repeatly
+	if tracing.Has(resolvePrefix + dts) {
 		return
 	}
-	tracing.Add(prefix + "/" + dts)
+	tracing.Add(resolvePrefix + dts)
+
+	a := strings.Split(utils.CleanPath(dts)[1:], "/")
+	versionedName := a[0]
+	subPath := a[1:]
+	if strings.HasPrefix(versionedName, "@") {
+		versionedName = strings.Join(a[0:2], "/")
+		subPath = a[2:]
+	}
+	pkgName, _ := utils.SplitByLastByte(versionedName, '@')
+	if pkgName == "" {
+		pkgName = versionedName
+	}
+	origin := ""
+	if cdnDomain == "localhost" || strings.HasPrefix(cdnDomain, "localhost:") {
+		origin = fmt.Sprintf("http://%s", cdnDomain)
+	} else if cdnDomain != "" {
+		origin = fmt.Sprintf("https://%s", cdnDomain)
+	}
+
+	dtsPath := utils.CleanPath(strings.Join(append([]string{
+		fmt.Sprintf("/v%d", VERSION),
+		versionedName,
+		resolvePrefix,
+	}, subPath...), "/"))
+	savePath := "types" + dtsPath
+	exists, _, err := fs.Exists(savePath)
+	if err != nil || exists {
+		return
+	}
+
+	imports := newStringSet()
+	allDeclareModules := newStringSet()
+	entryDeclareModules := []string{}
 
 	dtsFilePath := path.Join(wd, "node_modules", regVersionPath.ReplaceAllString(dts, "$1/"))
 	dtsDir := path.Dir(dtsFilePath)
 	dtsFile, err := os.Open(dtsFilePath)
 	if err != nil {
-		if os.IsNotExist(err) {
-			log.Warnf("copyDTS(%s): %v", dts, err)
-			err = nil
-		} else if strings.HasSuffix(err.Error(), "is a directory") {
-			log.Warnf("copyDTS(%s): %v", dts, err)
-			err = nil
-		}
 		return
 	}
-	defer dtsFile.Close()
 
-	saveFilePath := path.Join(config.storageDir, "types", fmt.Sprintf("v%d", VERSION), prefix, dts)
-	fi, err := os.Lstat(saveFilePath)
-	if err == nil {
-		if fi.IsDir() {
-			os.Remove(saveFilePath)
-		} else {
-			// do not repeat
-			return
+	dtsBuffer := bytes.NewBuffer(nil)
+	err = walkDts(dtsFile, dtsBuffer, func(importPath string, kind string, position int) string {
+		if kind == "declare module" {
+			allDeclareModules.Add(importPath)
 		}
+		return importPath
+	})
+	// close the opened dts file
+	dtsFile.Close()
+	if err != nil {
+		return
 	}
 
-	imports := newStringSet()
-	dmodules := []string{}
-	rewriteFn := func(importPath string) string {
+	buf := bytes.NewBuffer(nil)
+	if pkgName == "@types/node" {
+		fmt.Fprintf(buf, "/// <reference path=\"%s/v%d/node.ns.d.ts\" />\n", origin, VERSION)
+	}
+	err = walkDts(dtsBuffer, buf, func(importPath string, kind string, position int) string {
+		if kind == "declare module" {
+			// resove `declare module "xxx" {}`, and the "xxx" must equal to the `moduleName`
+			moduleName := pkgName
+			if len(subPath) > 0 {
+				moduleName += "/" + strings.Join(subPath, "/")
+				if strings.HasSuffix(moduleName, "/index.d.ts") {
+					moduleName = strings.TrimSuffix(moduleName, "/index.d.ts")
+				} else if strings.HasSuffix(moduleName, ".d.ts") {
+					moduleName = strings.TrimSuffix(moduleName, ".d.ts")
+				}
+			}
+			if strings.HasPrefix(importPath, "node:") {
+				importPath = "@types/node/" + strings.TrimPrefix(importPath, "node:")
+			}
+			if importPath == moduleName {
+				if strings.HasPrefix(moduleName, "@types/node/") {
+					return fmt.Sprintf("%s/v%d/%s.d.ts", origin, VERSION, moduleName)
+				} else {
+					res := fmt.Sprintf("%s/%s", origin, moduleName)
+					entryDeclareModules = append(entryDeclareModules, fmt.Sprintf("%s:%d", moduleName, position+len(res)+1))
+					return res
+				}
+			}
+			return importPath
+		}
+
+		if allDeclareModules.Has(importPath) {
+			return importPath
+		}
+
 		if isLocalImport(importPath) {
 			if importPath == "." {
 				importPath = "./index.d.ts"
@@ -69,258 +117,90 @@ func copyDTS(wd string, prefix string, dts string, tracing *stringSet) (err erro
 			if importPath == ".." {
 				importPath = "../index.d.ts"
 			}
+			// some types is using `.js` extname
+			if strings.HasSuffix(importPath, ".js") {
+				importPath = strings.TrimSuffix(importPath, ".js")
+			}
 			if !strings.HasSuffix(importPath, ".d.ts") {
 				if fileExists(path.Join(dtsDir, importPath, "index.d.ts")) {
 					importPath = strings.TrimSuffix(importPath, "/") + "/index.d.ts"
+				} else if fileExists(path.Join(dtsDir, importPath+".d.ts")) {
+					importPath = importPath + ".d.ts"
 				} else {
 					var p NpmPackage
 					packageJSONFile := path.Join(dtsDir, importPath, "package.json")
 					if fileExists(packageJSONFile) && utils.ParseJSONFile(packageJSONFile, &p) == nil {
-						types := getTypesPath(wd, p, "")
-						if types != "" {
-							_, typespath := utils.SplitByFirstByte(types, '/')
-							importPath = strings.TrimSuffix(importPath, "/") + "/" + typespath
-						} else {
-							importPath = ensureSuffix(strings.TrimSuffix(importPath, ".js"), ".d.ts")
+						if p.Types != "" {
+							importPath = strings.TrimSuffix(importPath, "/") + utils.CleanPath(p.Types)
+						} else if p.Typings != "" {
+							importPath = strings.TrimSuffix(importPath, "/") + utils.CleanPath(p.Typings)
 						}
-					} else {
-						importPath = ensureSuffix(strings.TrimSuffix(importPath, ".js"), ".d.ts")
 					}
 				}
+			}
+			if strings.HasSuffix(dts, ".d.ts") && !strings.HasSuffix(dts, "...d.ts") {
+				imports.Add(importPath)
 			}
 		} else {
-			if _, ok := builtInNodeModules[importPath]; ok {
-				importPath = "@types/node/" + importPath
-			}
-			if _, ok := builtInNodeModules["node:"+importPath]; ok {
-				importPath = "@types/node/" + strings.TrimPrefix(importPath, "node:")
-			}
-			pkgName, subpath := utils.SplitByFirstByte(importPath, '/')
-			if strings.HasPrefix(pkgName, "@") {
-				n, s := utils.SplitByFirstByte(subpath, '/')
-				pkgName = fmt.Sprintf("%s/%s", pkgName, n)
-				subpath = s
-			}
-			var p NpmPackage
-			packageJSONFile := path.Join(wd, "node_modules", pkgName, "package.json")
-			if fileExists(packageJSONFile) {
-				utils.ParseJSONFile(packageJSONFile, &p)
-			}
-			if p.Name == "" || (p.Types == "" && p.Typings == "") {
-				packageJSONFile = path.Join(wd, "node_modules", "@types", pkgName, "package.json")
-				if fileExists(packageJSONFile) {
-					utils.ParseJSONFile(packageJSONFile, &p)
-				}
-			}
-			if p.Name != "" {
-				importPath = getTypesPath(wd, p, subpath)
+			if importPath == "node" {
+				importPath = fmt.Sprintf("/v%d/node.ns.d.ts", VERSION)
+			} else if strings.HasPrefix(importPath, "node:") {
+				importPath = fmt.Sprintf("/v%d/@types/node/%s.d.ts", VERSION, strings.TrimPrefix(importPath, "node:"))
+			} else if _, ok := builtInNodeModules[importPath]; ok {
+				importPath = fmt.Sprintf("/v%d/@types/node/%s.d.ts", VERSION, importPath)
 			} else {
-				p, _, err := node.getPackageInfo("@types/"+pkgName, "latest")
-				if err != nil && err.Error() == fmt.Sprintf("npm: package '%s' not found", pkgName) {
-					p, _, err = node.getPackageInfo(pkgName, "latest")
+				info, subpath, formPackageJSON, err := getPackageInfo(wd, importPath, "latest")
+				if err != nil || ((info.Types == "" && info.Typings == "") && !strings.HasPrefix(info.Name, "@types/")) {
+					info, _, formPackageJSON, err = getPackageInfo(wd, toTypesPackageName(importPath), "latest")
 				}
-				if err == nil {
-					err = yarnAdd(wd, fmt.Sprintf("%s@%s", p.Name, p.Version))
-					if err == nil {
-						importPath = getTypesPath(wd, p, subpath)
-					}
+				if err != nil {
+					return importPath
 				}
-			}
-		}
-		imports.Add(importPath)
-		if !isLocalImport(importPath) {
-			importPath = "/" + importPath
-		}
-		if strings.HasPrefix(importPath, "/") {
-			importPath = fmt.Sprintf("/v%d/%s%s", VERSION, prefix, importPath[1:])
-		}
-		return importPath
-	}
 
-	buf := bytes.NewBuffer(nil)
-	scanner := bufio.NewScanner(dtsFile)
-	commentScope := false
-	importExportScope := false
-	for scanner.Scan() {
-		text := scanner.Text()
-		pure := strings.TrimSpace(text)
-		spaceLeftWidth := strings.Index(text, pure)
-		spacesOnRight := text[spaceLeftWidth+len(pure):]
-		buf.WriteString(text[:spaceLeftWidth])
-	Re:
-		if commentScope || strings.HasPrefix(pure, "/*") {
-			commentScope = true
-			endIndex := strings.Index(pure, "*/")
-			if endIndex > -1 {
-				commentScope = false
-				buf.WriteString(pure[:endIndex])
-				buf.WriteString("*/")
-				if rest := pure[endIndex+2:]; rest != "" {
-					pure = strings.TrimSpace(rest)
-					buf.WriteString(rest[:strings.Index(rest, pure)])
-					goto Re
-				}
-			} else {
-				buf.WriteString(pure)
-			}
-		} else if i := strings.Index(pure, "/*"); i > 0 {
-			if startsWith(pure, "import ", "export ", "import{", "export{", "import {", "export {") {
-				importExportScope = true
-			}
-			buf.WriteString(pure[:i])
-			pure = pure[i:]
-			goto Re
-		} else if strings.HasPrefix(pure, "///") {
-			s := strings.TrimSpace(strings.TrimPrefix(pure, "///"))
-			if regReferenceTag.MatchString(s) {
-				a := regReferenceTag.FindAllStringSubmatch(s, 1)
-				format := a[0][1]
-				path := a[0][3]
-				if format == "path" {
-					if !isLocalImport(path) {
-						path = "./" + path
-					}
-				}
-				if format == "types" {
-					if path == "node" {
-						path = fmt.Sprintf("/v%d/node.ns.d.ts", VERSION)
+				if info.Types != "" || info.Typings != "" {
+					versioned := info.Name + "@" + info.Version
+					prefix := versioned + "/" + resolvePrefix
+					// copy dependent dts files in the node_modules directory in current build context
+					if formPackageJSON {
+						importPath = toTypesPath(wd, info, subpath)
+						if strings.HasSuffix(importPath, ".d.ts") && !strings.HasSuffix(importPath, "...d.ts") {
+							imports.Add(importPath)
+						}
+						importPath = prefix + strings.TrimPrefix(importPath, versioned+"/")
 					} else {
-						path = rewriteFn(path)
-					}
-					protocol := "https:"
-					if config.domain == "localhost" {
-						protocol = "http:"
-					}
-					fmt.Fprintf(buf, `/// <reference path="%s//%s%s" />`, protocol, config.domain, path)
-				} else {
-					fmt.Fprintf(buf, `/// <reference path="%s" />`, rewriteFn(path))
-				}
-			} else {
-				buf.WriteString(pure)
-			}
-		} else if strings.HasPrefix(pure, "//") {
-			buf.WriteString(pure)
-		} else if strings.HasPrefix(pure, "declare") && regDeclareModule.MatchString(pure) {
-			q := "'"
-			a := strings.Split(pure, q)
-			if len(a) != 3 {
-				q = `"`
-				a = strings.Split(pure, q)
-			}
-			if len(a) == 3 && strings.HasPrefix(dts, a[1]) {
-				buf.WriteString(a[0])
-				buf.WriteString(q)
-				newname := fmt.Sprintf("https://%s/%s", config.domain, a[1])
-				if config.domain == "localhost" {
-					newname = fmt.Sprintf("http://localhost/%s", a[1])
-				}
-				buf.WriteString(newname)
-				buf.WriteString(q)
-				dmodules = append(dmodules, fmt.Sprintf("%s:%d", newname, buf.Len()))
-				buf.WriteString(a[2])
-			} else {
-				buf.WriteString(pure)
-			}
-		} else {
-			scanner := bufio.NewScanner(strings.NewReader(pure))
-			scanner.Split(onSemicolon)
-			var i int
-			for scanner.Scan() {
-				if i > 0 {
-					buf.WriteByte(';')
-				}
-				text := scanner.Text()
-				expr := strings.TrimSpace(text)
-				buf.WriteString(text[:strings.Index(text, expr)])
-				if expr != "" {
-					if importExportScope || startsWith(expr, "import ", "export ", "import{", "export{", "import {", "export {") {
-						importExportScope = true
-						if regFromExpr.MatchString(expr) {
-							importExportScope = false
-							q := "'"
-							a := strings.Split(expr, q)
-							if len(a) != 3 {
-								q = `"`
-								a = strings.Split(expr, q)
-							}
-							if len(a) == 3 {
-								buf.WriteString(a[0])
-								buf.WriteString(q)
-								buf.WriteString(rewriteFn(a[1]))
-								buf.WriteString(q)
-								buf.WriteString(a[2])
-							} else {
-								buf.WriteString(expr)
+						if subpath == "" {
+							if info.Types != "" {
+								importPath = prefix + utils.CleanPath(info.Types)[1:]
+							} else if info.Typings != "" {
+								importPath = prefix + utils.CleanPath(info.Typings)[1:]
 							}
 						} else {
-							if regImportCallExpr.MatchString(expr) {
-								buf.WriteString(regImportCallExpr.ReplaceAllStringFunc(expr, func(importCallExpr string) string {
-									q := "'"
-									a := strings.Split(importCallExpr, q)
-									if len(a) != 3 {
-										q = `"`
-										a = strings.Split(importCallExpr, q)
-									}
-									if len(a) == 3 {
-										buf := bytes.NewBuffer(nil)
-										buf.WriteString(a[0])
-										buf.WriteString(q)
-										buf.WriteString(rewriteFn(a[1]))
-										buf.WriteString(q)
-										buf.WriteString(a[2])
-										return buf.String()
-									}
-									return importCallExpr
-								}))
-							} else {
-								buf.WriteString(expr)
-							}
+							importPath = prefix + utils.CleanPath(subpath)[1:]
 						}
-					} else {
-						if regImportCallExpr.MatchString(expr) {
-							buf.WriteString(regImportCallExpr.ReplaceAllStringFunc(expr, func(importCallExpr string) string {
-								q := "'"
-								a := strings.Split(importCallExpr, q)
-								if len(a) != 3 {
-									q = `"`
-									a = strings.Split(importCallExpr, q)
-								}
-								if len(a) == 3 {
-									buf := bytes.NewBuffer(nil)
-									buf.WriteString(a[0])
-									buf.WriteString(q)
-									buf.WriteString(rewriteFn(a[1]))
-									buf.WriteString(q)
-									buf.WriteString(a[2])
-									return buf.String()
-								}
-								return importCallExpr
-							}))
-						} else {
-							buf.WriteString(expr)
+						if !strings.HasSuffix(importPath, ".d.ts") {
+							importPath += "...d.ts"
 						}
 					}
+					importPath = fmt.Sprintf("/v%d/%s", VERSION, importPath)
 				}
-				if i > 0 && importExportScope {
-					importExportScope = false
-				}
-				i++
 			}
+
+			// full CDN URL
+			importPath = origin + importPath
 		}
-		buf.WriteString(spacesOnRight)
-		buf.WriteByte('\n')
-	}
-	err = scanner.Err()
+
+		return importPath
+	})
 	if err != nil {
 		return
 	}
 
-	dtsData := buf.Bytes()
-	dataLen := buf.Len()
-	if len(dmodules) > 0 {
-		for _, record := range dmodules {
-			name, istr := utils.SplitByLastByte(record, ':')
-			i, _ := strconv.Atoi(istr)
+	if len(entryDeclareModules) > 0 {
+		dtsData := buf.Bytes()
+		dataLen := buf.Len()
+		for _, record := range entryDeclareModules {
+			name, pos := utils.SplitByLastByte(record, ':')
+			i, _ := strconv.Atoi(pos)
 			b := bytes.NewBuffer(nil)
 			open := false
 			internal := 0
@@ -343,20 +223,34 @@ func copyDTS(wd string, prefix string, dts string, tracing *stringSet) (err erro
 				}
 			}
 			if b.Len() > 0 {
-				fmt.Fprintf(buf, `%sdeclare module "%s@*" `, "\n", name)
+				slice := strings.Split(name, "/")
+				subpath := ""
+				if l := len(slice); strings.HasPrefix(name, "@") && l > 1 {
+					name = strings.Join(slice[:2], "/")
+					if l > 2 {
+						subpath = "/" + strings.Join(slice[2:], "/")
+					}
+				} else {
+					name = slice[0]
+					if l > 1 {
+						subpath = "/" + strings.Join(slice[1:], "/")
+					}
+				}
+				fmt.Fprintf(buf, `%sdeclare module "%s/%s@*%s" `, "\n", origin, name, subpath)
 				fmt.Fprintf(buf, strings.TrimSpace(b.String()))
 			}
 		}
 	}
 
-	ensureDir(path.Dir(saveFilePath))
-	saveFile, err := os.Create(saveFilePath)
-	if err != nil {
-		return
+	// workaroud for `@types/node`
+	if pkgName == "@types/node" {
+		dtsData := buf.Bytes()
+		dtsData = bytes.ReplaceAll(dtsData, []byte(" implements NodeJS.ReadableStream"), []byte{})
+		dtsData = bytes.ReplaceAll(dtsData, []byte(" implements NodeJS.WritableStream"), []byte{})
+		buf = bytes.NewBuffer(dtsData)
 	}
 
-	_, err = io.Copy(saveFile, buf)
-	saveFile.Close()
+	err = fs.WriteData(savePath, buf.Bytes())
 	if err != nil {
 		return
 	}
@@ -374,9 +268,8 @@ func copyDTS(wd string, prefix string, dts string, tracing *stringSet) (err erro
 				importDts = path.Join(path.Dir(dts), importDts)
 			}
 		}
-		err = copyDTS(wd, prefix, importDts, tracing)
+		err = copyDTS(wd, resolvePrefix, importDts, tracing)
 		if err != nil {
-			os.Remove(saveFilePath)
 			break
 		}
 	}
@@ -384,54 +277,39 @@ func copyDTS(wd string, prefix string, dts string, tracing *stringSet) (err erro
 	return
 }
 
-func getTypesPath(wd string, p NpmPackage, subpath string) string {
+func toTypesPath(wd string, p NpmPackage, subpath string) string {
 	var types string
 	if subpath != "" {
-		var subpkg NpmPackage
-		var subtypes string
-		subpkgJSONFile := path.Join(wd, "node_modules", p.Name, subpath, "package.json")
-		if fileExists(subpkgJSONFile) && utils.ParseJSONFile(subpkgJSONFile, &subpkg) == nil {
-			if subpkg.Types != "" {
-				subtypes = subpkg.Types
-			} else if subpkg.Typings != "" {
-				subtypes = subpkg.Typings
+		types = subpath
+		packageJSONFile := path.Join(wd, "node_modules", p.Name, subpath, "package.json")
+		if fileExists(packageJSONFile) {
+			var sp NpmPackage
+			if utils.ParseJSONFile(packageJSONFile, &sp) == nil {
+				if sp.Types != "" {
+					types = path.Join(subpath, sp.Types)
+				} else if sp.Typings != "" {
+					types = path.Join(subpath, sp.Typings)
+				}
 			}
 		}
-		if subtypes != "" {
-			types = path.Join("/", subpath, subtypes)
-		} else {
-			types = subpath
-		}
+	} else if p.Types != "" {
+		types = p.Types
+	} else if p.Typings != "" {
+		types = p.Typings
 	} else {
-		if p.Types != "" {
-			types = p.Types
-		} else if p.Typings != "" {
-			types = p.Typings
-		} else if p.Main != "" {
-			types = strings.TrimSuffix(p.Main, ".js")
+		return ""
+	}
+
+	if !strings.HasSuffix(types, ".d.ts") {
+		pkgDir := path.Join(wd, "node_modules", p.Name)
+		if fileExists(path.Join(pkgDir, types, "index.d.ts")) {
+			types = types + "/index.d.ts"
+		} else if fileExists(path.Join(pkgDir, types+".d.ts")) {
+			types = types + ".d.ts"
 		} else {
-			types = "index.d.ts"
+			types = types + "...d.ts" // dynamic
 		}
 	}
 
-	if !strings.HasSuffix(types, ".d.ts") && fileExists(path.Join(wd, "node_modules", p.Name, types, "index.d.ts")) {
-		types = types + "/index.d.ts"
-	}
-
-	return fmt.Sprintf("%s@%s/%s", p.Name, p.Version, strings.TrimPrefix(ensureSuffix(types, ".d.ts"), "/"))
-}
-
-func onSemicolon(data []byte, atEOF bool) (advance int, token []byte, err error) {
-	for i := 0; i < len(data); i++ {
-		if data[i] == ';' {
-			return i + 1, data[:i], nil
-		}
-	}
-	if !atEOF {
-		return 0, nil, nil
-	}
-	// There is one final token to be delivered, which may be the empty string.
-	// Returning bufio.ErrFinalToken here tells Scan there are no more tokens after this
-	// but does not trigger an error to be returned from Scan itself.
-	return 0, data, bufio.ErrFinalToken
+	return fmt.Sprintf("%s@%s%s", p.Name, p.Version, utils.CleanPath(types))
 }
